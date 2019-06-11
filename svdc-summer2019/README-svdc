@@ -1,0 +1,506 @@
+#-------------------------------------------------------------------------
+# Survey Validation Data Challenge
+
+TODO before
+  * svsim -> tiles
+    + anything?
+    - PROGRAM column, e.g. SV_BGS vs. BRIGHT
+  * select_mock_targets: tiles -> targets, spectra
+    + Update SV target densities
+    + Sanity check on miniSV
+    + re-enable ELG in config file
+  * fiberassign: tiles + targets -> assignments
+    X new tag with Ted's changes?
+    X readjust SUBPRIORITY or otherwise downsample catalogs?
+    X same PRIORITY for all classes, only using density or SUBPRIORITY to select
+    - PR for ability to specify masks by name not number
+    - Check reproducibility and mask bit specification
+    - Check PROGRAM and other header keywords for ICS
+  * newexp
+    - anything?
+  * pixsim
+    - reproducibly random CCD amplifier offsets
+    - update B CCD read noise
+
+#-------------------------------------------------------------------------
+#- svdc2019c
+
+godesi master
+
+cd $SCRATCH/desi/code/survey-validation/svdc-summer2019
+export BASEDIR=$SCRATCH/desi/svdc2019c
+
+mkdir -p $BASEDIR/survey
+mkdir -p $BASEDIR/targets
+mkdir -p $BASEDIR/fiberassign
+
+#--- svsim
+
+python svsim.py -o $BASEDIR/survey --firstnight 20200101 --numnights 31 --randseed 1
+
+#--- select_mock_targets
+
+mkdir -p $BASEDIR/targets
+
+#- Haswell: run 4 workers per node, with 8x multiprocessing
+# finished in 113m55.046s
+
+salloc -N 40 -C haswell -t 04:00:00 -q interactive
+time srun -N 40 -n 160 -c 16 mpi_select_mock_targets \
+    -s 1 -n 8 --survey sv1 --nside 64 --verbose \
+    --output_dir $BASEDIR/targets \
+    --config sv-mock-targets.yaml \
+    --tiles $BASEDIR/survey/SV-tiles.fits
+
+#- merge targets: 16m15s    
+time join_mock_targets --mockdir $BASEDIR/targets --overwrite
+
+#- target QA: 4m44s
+time run_target_qa $BASEDIR/targets/targets.fits \
+    $p/desi/www/users/sjbailey/svdc2019c/ --mocks --nosystematics
+
+#- Divide MTL into individual programs
+
+cd $BASEDIR/targets
+
+import fitsio
+from desitarget.sv1.sv1_targetmask import desi_mask
+
+mtl, hdr = fitsio.read(os.path.expandvars('$BASEDIR/targets/mtl.fits'), header=True)
+
+LQ8 = (mtl['SV1_DESI_TARGET'] & desi_mask.mask('QSO_COLOR_8PASS|QSO_RF_8PASS|QSO_HZ_F|LRG_HIGHZ|LRG_RELAX|LRG_SUPER')) != 0
+LQ4 = (mtl['SV1_DESI_TARGET'] & desi_mask.mask('QSO_COLOR_4PASS|QSO_RF_4PASS|LRG_INIT|LRG_LOWZ')) != 0
+QSO = (mtl['SV1_DESI_TARGET'] & desi_mask.mask('QSO')) != 0
+ELG = (mtl['SV1_DESI_TARGET'] & desi_mask.mask('ELG')) != 0
+BGS = (mtl['SV1_DESI_TARGET'] & desi_mask.mask('BGS_ANY')) != 0
+MWS = (mtl['SV1_DESI_TARGET'] & desi_mask.mask('MWS_ANY')) != 0
+
+STDFaint = (mtl['SV1_DESI_TARGET'] & desi_mask.mask('STD_FAINT|STD_WD')) != 0
+STDBright = (mtl['SV1_DESI_TARGET'] & desi_mask.mask('STD_BRIGHT|STD_WD')) != 0
+
+outdir = os.path.expandvars('$BASEDIR/targets')
+fitsio.write(outdir + '/mtl-SV_LQ8.fits', mtl[LQ8|STDFaint], header=hdr, extname='TARGETS')
+fitsio.write(outdir + '/mtl-SV_LQ4.fits', mtl[LQ4|STDFaint], header=hdr, extname='TARGETS')
+fitsio.write(outdir + '/mtl-SV_QSO.fits', mtl[QSO|STDFaint], header=hdr, extname='TARGETS')
+fitsio.write(outdir + '/mtl-SV_ELG.fits', mtl[ELG|STDFaint], header=hdr, extname='TARGETS')
+fitsio.write(outdir + '/mtl-SV_BGS.fits', mtl[BGS|STDBright], header=hdr, extname='TARGETS')
+fitsio.write(outdir + '/mtl-SV_MWS.fits', mtl[MWS|STDBright], header=hdr, extname='TARGETS')
+
+#- TODO: confirm that QSO tiles don't overlap with LQ8 and LQ4
+
+#--- fiber assignment
+
+godesi master
+export BASEDIR=$SCRATCH/desi/svdc2019c
+
+PROGRAM=SV_LQ8 && fiberassign --mtl $BASEDIR/targets/mtl-${PROGRAM}.fits \
+    --sky $BASEDIR/targets/sky.fits \
+    --footprint $BASEDIR/survey/${PROGRAM}-tiles.fits \
+    --outdir $BASEDIR/fiberassign/${PROGRAM}/ \
+    --nstarpetal 20 --nskypetal 80
+
+PROGRAM=SV_LQ4 && fiberassign --mtl $BASEDIR/targets/mtl-${PROGRAM}.fits \
+    --sky $BASEDIR/targets/sky.fits \
+    --footprint $BASEDIR/survey/${PROGRAM}-tiles.fits \
+    --outdir $BASEDIR/fiberassign/${PROGRAM}/ \
+    --nstarpetal 20 --nskypetal 80
+
+PROGRAM=SV_QSO && fiberassign --mtl $BASEDIR/targets/mtl-${PROGRAM}.fits \
+    --sky $BASEDIR/targets/sky.fits \
+    --footprint $BASEDIR/survey/${PROGRAM}-tiles.fits \
+    --outdir $BASEDIR/fiberassign/${PROGRAM}/ \
+    --nstarpetal 20 --nskypetal 80
+
+PROGRAM=SV_ELG && fiberassign --mtl $BASEDIR/targets/mtl-${PROGRAM}.fits \
+    --sky $BASEDIR/targets/sky.fits \
+    --footprint $BASEDIR/survey/${PROGRAM}-tiles.fits \
+    --outdir $BASEDIR/fiberassign/${PROGRAM}/ \
+    --nstarpetal 20 --nskypetal 80
+
+PROGRAM=SV_BGS && fiberassign --mtl $BASEDIR/targets/mtl-${PROGRAM}.fits \
+    --sky $BASEDIR/targets/sky.fits \
+    --footprint $BASEDIR/survey/${PROGRAM}-tiles.fits \
+    --outdir $BASEDIR/fiberassign/${PROGRAM}/ \
+    --nstarpetal 20 --nskypetal 80
+
+PROGRAM=SV_MWS && fiberassign --mtl $BASEDIR/targets/mtl-${PROGRAM}.fits \
+    --sky $BASEDIR/targets/sky.fits \
+    --footprint $BASEDIR/survey/${PROGRAM}-tiles.fits \
+    --outdir $BASEDIR/fiberassign/${PROGRAM}/ \
+    --nstarpetal 20 --nskypetal 80
+
+ls $BASEDIR/fiberassign/SV_*/tile-*.fits
+
+cp $BASEDIR/fiberassign/SV_*/tile-*.fits $BASEDIR/fiberassign/
+
+#- TODO: only merge tiles that were included in original assignment
+#-       to avoid having to write each step to a separate dir
+
+#- TODO: compare these (they don't agree)
+
+module swap fiberassign/sjb
+fiberassign --mtl $BASEDIR/targets/mtl-SV_LQ8.fits \
+    --sky $BASEDIR/targets/sky.fits \
+    --footprint $BASEDIR/survey/test-tiles.fits \
+    --outdir $BASEDIR/fiberassign/v1/ \
+    --nstarpetal 20 --nskypetal 80
+
+fiberassign --mtl $BASEDIR/targets/mtl.fits \
+    --sky $BASEDIR/targets/sky.fits \
+    --footprint $BASEDIR/survey/test-tiles.fits \
+    --outdir $BASEDIR/fiberassign/v2/ \
+    --nstarpetal 20 --nskypetal 80 \
+    --sciencemask QSO_COLOR_8PASS,QSO_RF_8PASS,QSO_HZ_F,LRG_HIGHZ,LRG_RELAX,LRG_SUPER \
+    --stdmask STD_FAINT,STD_WD
+
+#- match the defaults, but do it explicitly
+fiberassign --mtl $BASEDIR/targets/mtl.fits \
+    --sky $BASEDIR/targets/sky.fits \
+    --footprint $BASEDIR/survey/test-tiles.fits \
+    --outdir $BASEDIR/fiberassign/v3/ \
+    --nstarpetal 20 --nskypetal 80 \
+    --sciencemask 8070450532247928839 \
+    --stdmask 60129542144
+
+#--- TODO: wrap-newexp to combine inputs for simulation
+
+#- TODO: alt < 5 deg? failures
+
+godesi master
+export BASEDIR=$SCRATCH/desi/svdc2019c
+export DESI_SPECTRO_REDUX=$BASEDIR/spectro/redux
+export DESI_SPECTRO_SIM=$BASEDIR/spectro/sim
+export SPECPROD=v1
+export PIXPROD=v1
+export DESI_SPECTRO_DATA=$DESI_SPECTRO_SIM/$PIXPROD
+
+#- 601 exposures
+#- memory limited; run one process per node (maybe 2 would have worked)
+#- ~2-5 (node-min)/exp
+export NODES=60
+salloc -N $NODES -C haswell -t 04:00:00 -q interactive
+time srun -N $NODES -n $NODES -c 64 \
+    wrap-newexp --mpi \
+    --fiberassign $BASEDIR/fiberassign \
+    --mockdir $BASEDIR/targets \
+    --obslist $BASEDIR/survey/sv_exposures.fits \
+    --tilefile $BASEDIR/survey/SV-tiles.fits
+
+#-------------------------------------------------------------------------
+#- Reset TILEIDs to lower numbers
+
+tilefiles = [
+    'FAINT_LRG+QSO_SV_10_8x_superset20.fits',
+    'BRIGHT_LRG+QSO_SV_10_4x_superset20.fits',
+    'QSO_SV_10_4x_superset19.fits',
+    'ELG_SV_25_4x_superset50.fits',
+    'BGS_SV_30_3x_superset58.fits',
+    'MWS_SV_25_3x_superset50.fits',
+    ]
+svtilemin = 70000
+for i, filename in enumerate(tilefiles):
+    x = Table.read(filename)
+    tileids = svtilemin + i*1000 + np.arange(len(x), dtype=np.int32)
+    x['TILEID'] = tileids
+    print(filename, tileids[0], tileids[-1])
+    x.meta['EXTNAME'] = 'TILES'
+    x.write(filename, overwrite=True)
+    
+
+#-------------------------------------------------------------------------
+#- svdc2019b
+
+godesi master
+
+cd $SCRATCH/desi/code/survey-validation/svdc-summer2019
+export BASEDIR=$SCRATCH/desi/svdc2019b
+
+mkdir -p $BASEDIR/survey
+mkdir -p $BASEDIR/targets
+mkdir -p $BASEDIR/fiberassign
+
+python svsim.py -o $BASEDIR/survey --firstnight 20200101 --numnights 31 --randseed 1
+
+
+#--- What healpix are covered?
+import desimodel.footprint
+import healpy as hp
+
+svtiles = Table.read(os.path.expandvars('$BASEDIR/survey/SV-tiles.fits'))
+nside = 64
+healpixels = desimodel.footprint.tiles2pix(nside, svtiles)
+area = hp.nside2pixarea(nside, degrees=True) * len(healpixels)
+print('{} tiles -> {} healpix -> {:.1f} deg2'.format(len(svtiles), len(healpixels), area))
+
+86 tiles -> 1213 healpix -> 1018.1 deg2
+
+#- just for one tile as a test
+hpix = desimodel.footprint.tiles2pix(nside, svtiles[0:1])
+hpix
+
+svtiles[0:1].write('onetile.fits')
+
+#--- select_mock_targets
+
+mkdir -p $BASEDIR/targets
+
+#- Haswell: run 4 ranks per node x 5 nodes = 20 ranks for 20 test pix
+#- 14m14s
+#- 11m with higher LRG, QSO densities but not ELG
+salloc -N 5 -C haswell -t 01:00:00 -q interactive
+time srun -N 5 -n 20 -c 8 mpi_select_mock_targets \
+    -O $BASEDIR/targets/v3 -s 1 -n 4 --survey sv1 --nside 64 \
+    --config sv-mock-targets.yaml \
+    --healpixels 6769 6770 6771 6772 6773 6774 6775 6776 6777 6778 6779 6780 6781 6782 6783 6944 6945 6946 6947 6952
+
+#- KNL on 5 nodes with 2x wider multiprocessing
+# real	99m26.134s
+
+mkdir -p $BASEDIR/targets-knl
+salloc -N 5 -C knl -t 02:00:00 -q interactive
+time srun -N 5 -n 20 -c 16 mpi_select_mock_targets --verbose \
+    -O $BASEDIR/targets-knl/ -s 1 -n 8 --survey sv1 --nside 64 \
+    --config sv-mock-targets.yaml \
+    --healpixels 6769 6770 6771 6772 6773 6774 6775 6776 6777 6778 6779 6780 6781 6782 6783 6944 6945 6946 6947 6952
+
+1213 * 15/60 / 4 = 75 node hours needed to do all pixels on Haswell
+
+#--- join targets
+
+join_mock_targets --mockdir $BASEDIR/targets/v3 --overwrite
+
+time run_target_qa $BASEDIR/targets/v3/targets.fits \
+    $p/desi/www/users/sjbailey/svdc2019b/v3 --mocks --nosystematics
+
+#--- Fiber Assignment
+
+godesi master
+module swap fiberassign/sjb
+export BASEDIR=$SCRATCH/desi/svdc2019b
+
+cd $SCRATCH/desi/code/survey-validation/svdc-summer2019
+
+export VER=v3
+fiberassign --mtl $BASEDIR/targets/$VER/mtl.fits \
+    --sky $BASEDIR/targets/$VER/sky.fits \
+    --footprint onetile.fits \
+    --outdir $BASEDIR/fiberassign/$VER \
+    --nstarpetal 20 --nskypetal 80 \
+    --sciencemask QSO_COLOR_8PASS,QSO_RF_8PASS,QSO_HZ_F,LRG_HIGHZ,LRG_RELAX,LRG_SUPER \
+    --stdmask STD_FAINT,STD_WD
+
+too many STD and SKY
+QSO assignments ~5x lower than input density
+LRG assignments ~2x lower than input density
+
+cd $BASEDIR/fiberassign
+fba_plot_results --dir . --footprint ../survey/SV-tiles.fits
+
+fba_run_qa --dir . --footprint ../survey/SV-tiles.fits
+fba_plot_qa --qafile qa.json
+
+#-------------------------------------------------------------------------
+Steps
+  * pick a tile
+  * identify healpix
+  * run select_mock_targets on those healpix
+  * fiberassign those
+  * [pixsim]
+  * pipeline
+
+## Basic setup
+
+godesi master
+module swap fiberassign/sjb
+module swap desisim/sjb
+module swap desispec/sjb
+cd $SCRATCH/desi/code/survey-validation/svdc-summer2019
+export BASEDIR=$SCRATCH/desi/svdc2019a
+
+export DESI_SPECTRO_REDUX=$BASEDIR/spectro/redux
+export DESI_SPECTRO_SIM=$BASEDIR/spectro/sim
+export SPECPROD=v1
+export PIXPROD=v1
+export DESI_SPECTRO_DATA=$DESI_SPECTRO_SIM/$PIXPROD
+
+## Pick a tile
+
+Create a set of 3 test tiles:
+
+```
+from astropy.table import Table
+citiles = Table.read('/project/projectdirs/desi/cmx/ci/tiles/v7/ci-tiles-v7.fits')
+ii = np.in1d(citiles['TILEID'], [58060, 58253, 58381])
+svtiles = citiles[ii]
+svtiles['TILEID'] = [77000, 77001, 77002]
+svtiles['PROGRAM'] = 'SV_LQ4'
+svtiles.write('testtiles-lrgqso-4x.fits')
+
+import desimodel.footprint
+nside = 64
+healpixels = desimodel.footprint.tiles2pix(nside, svtiles)
+
+array([ 2090,  2091,  2107,  2110,  2111,  2154,  2176,  2177,  2178,
+        2179,  2180,  2182,  2184,  2185,  2193,  2195,  2196,  2197,
+        2198,  2199,  2201,  2204,  2205,  2209,  2210,  2211,  2212,
+        2213,  2214,  2215,  2216,  2217,  2218,  2219,  2220,  2221,
+        2222,  2223,  2226,  2232,  2240,  2242,  2248,  2561,  2564,
+       19838, 19839, 19924, 19925, 19926, 19927, 19932, 19933])
+```
+
+## Run select_mock_targets
+
+About 10 minutes per healpix per 4 cores.  I could have saved some time
+not simulating BGS or MWS, but I do still need standard stars.
+
+```
+mkdir -p $BASEDIR/targets
+cp $DESITARGET/py/desitarget/mock/data/select-mock-targets.yaml . 
+srun -N 1 -n 8 -c 4 mpi_select_mock_targets \
+    -O $BASEDIR/targets/ -s 1 -n 4 --survey sv1 --nside 64 \
+    --config select-mock-targets.yaml --tiles testtiles-lrgqso-4x.fits
+
+# Merge individual files into one
+select_mock_targets -O $BASEDIR/targets/ --nside 64 --join \
+    --tiles testtiles-lrgqso-4x.fits
+```
+
+## Fiber Assignment
+module swap fiberassign/sjb
+
+fiberassign --mtl $BASEDIR/targets/mtl.fits --sky $BASEDIR/targets/sky.fits \
+    --footprint testtiles-lrgqso-4x.fits \
+    --outdir $BASEDIR/fiberassign \
+    --nstarpetal 20 --nskypetal 80
+
+## Exposures List
+
+See jupyter desi/dev/svdc/SVObsSim.ipynb
+
+TODO
+
+  file: /project/projectdirs/desi/datachallenge/redwood/survey/exposures.fits
+  extension: 1
+  type: BINARY_TBL
+  extname: EXPOSURES
+  rows: 39
+  column info:
+    EXPID               i4  
+    TILEID              i4  
+    PASS                i2  
+    RA                  f8  
+    DEC                 f8  
+    EBMV                f4  
+    NIGHT               S8  
+    MJD                 f8  
+    EXPTIME             f8  
+    SEEING              f8  
+    TRANSPARENCY        f8  
+    AIRMASS             f8  
+    MOONFRAC            f8  
+    MOONALT             f8  
+    MOONSEP             f8  
+    PROGRAM             S6  
+    FLAVOR              S7  
+
+## newexp wrapper to collect inputs for pixsim
+
+export NODES=5
+salloc -N $NODES -C haswell -t 04:00:00 -q interactive
+srun -N $NODES -n $NODES -c 64 \
+    wrap-newexp --mpi \
+    --fiberassign $BASEDIR/fiberassign \
+    --mockdir $BASEDIR/targets \
+    --obslist $BASEDIR/survey/exposures.fits \
+    --tilefile $BASEDIR/survey/testtiles-lrgqso-4x.fits
+
+## pixsim
+
+export NODES=20
+let "NPROC = $NODES * 32"
+export NPROC
+export DESI_COSMICS_TEMPLATES=$DESI_ROOT/spectro/templates/cosmics/v0.3
+
+salloc -N $NODES -C haswell -t 04:00:00 -q interactive
+srun -N $NODES -n $NPROC -c 2 \
+    pixsim_nights_mpi --nights 20201020 --cosmics --nodes_per_exp 10 --nexp 13
+
+srun -N $NODES -n $NPROC -c 2 \
+    pixsim_nights_mpi --nights 20201021 --cosmics --nodes_per_exp 10 --nexp 10
+
+srun -N $NODES -n $NPROC -c 2 \
+    -C haswell -t 04:00:00 -q interactive \
+    pixsim_nights_mpi --nights 20201020 --cosmics --nodes_per_exp 10
+
+## Spectro pipeline
+
+desi_pipe create --db-postgres 
+
+source $BASEDIR/spectro/redux/v1/setup.sh
+
+desi_pipe go --debug
+desi_pipe top --once
+
+----------------+---------+---------+---------+---------+---------+---------+
+   Task Type    | waiting | ready   | running | done    | failed  | submit  |
+----------------+---------+---------+---------+---------+---------+---------+
+preproc         |        0|      690|        0|        0|        0|      690|
+psf             |      180|        0|        0|        0|        0|      180|
+psfnight        |       60|        0|        0|        0|        0|       60|
+traceshift      |      510|        0|        0|        0|        0|      510|
+extract         |      510|        0|        0|        0|        0|      510|
+fiberflat       |      180|        0|        0|        0|        0|      180|
+fiberflatnight  |       60|        0|        0|        0|        0|       60|
+sky             |      330|        0|        0|        0|        0|      330|
+starfit         |      110|        0|        0|        0|        0|      110|
+fluxcalib       |      330|        0|        0|        0|        0|      330|
+cframe          |      330|        0|        0|        0|        0|      330|
+spectra         |       53|        0|        0|        0|        0|       NA|
+redshift        |       53|        0|        0|        0|        0|       NA|
+----------------+---------+---------+---------+---------+---------+---------+
+
+Submitted May 25 @ 21:18; maybe I should have tried debug queue...
+ JOBID PARTITION     NAME     USER ST       TIME  NODES NODELIST(REASON)
+21723277   regular preproc- sjbailey PD       0:00     57 (Priority)
+21723279   regular traceshi sjbailey PD       0:00    188 (Dependency)
+21723281   regular fiberfla sjbailey PD       0:00      7 (Dependency)
+21723283   regular preproc- sjbailey PD       0:00     57 (Priority)
+21723285   regular traceshi sjbailey PD       0:00    132 (Dependency)
+21723287   regular fiberfla sjbailey PD       0:00      4 (Dependency)
+21723289   regular spectra- sjbailey PD       0:00     53 (Dependency)
+
+20201020 traceshift+extract job timed out; job time was 16 min
+- 3 min python startup
+- 5 min to get to running individual traceshifts (log redirection)
+- 1.5 - 3 min traceshifts
+- 3 min post-processing (updating extract task readiness?)
+- ended before extract tasks were moved from "ready" to "running"
+resubmitting 5/26 @ 19:54
+
+20201021 traceshift+extractions worked, but fiberflat still in "ready"
+ - 1 min python startup
+ - looks like all fiberflats failed, but didn't update DB.
+ - run/scripts/fiberflat-cframe_20190525-211817/cori-haswell_20190526-195550.log
+ - code typo causing exception, but why didn't it mark tasks as failed?
+ - False alarm? Job started, ran, and failed and logged while I was noticing this
+ 
+desi_pipe cleanup --failed --tasktypes fiberflat
+cd $DESI_SPECTRO_REDUX/$SPECPROD/run/scripts/fiberflat-cframe_20190525-211817
+sbatch --partition debug cori-haswell.slurm
+
+#-------------------------------------------------------------------------
+godesi master && module swap desispec/sjb
+export BASEDIR=$SCRATCH/desi/svdc2019a
+source $BASEDIR/spectro/redux/v1/setup.sh
+desi_pipe top --once
+
+Rerunning is really slow; DB operations are taking 5-6 minutes to figure out
+that a step has already been done.
+
+Profiling "desi_pipe top --once" it spends nearly all of its time in importing
+
+desi_zcatalog --indir $DESI_SPECTRO_REDUX/$SPECPROD/spectra-64 \
+    --outfile $DESI_SPECTRO_REDUX/$SPECPROD/spectra-64/zcatalog-v1.fits \
+    --fibermap --spectra-scores --match $BASEDIR/targets/targets.fits
+
+
