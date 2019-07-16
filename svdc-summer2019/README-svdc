@@ -13,7 +13,7 @@ TODO before
     X new tag with Ted's changes?
     X readjust SUBPRIORITY or otherwise downsample catalogs?
     X same PRIORITY for all classes, only using density or SUBPRIORITY to select
-    - PR for ability to specify masks by name not number
+    + PR for ability to specify masks by name not number
     - Check reproducibility and mask bit specification
     - Check PROGRAM and other header keywords for ICS
   * newexp
@@ -21,6 +21,42 @@ TODO before
   * pixsim
     - reproducibly random CCD amplifier offsets
     - update B CCD read noise
+
+#-------------------------------------------------------------------------
+#- per-night redrock
+
+godesi master
+module swap redrock/sjb
+export BASEDIR=$SCRATCH/desi/svdc2019c
+
+export NODES=50
+salloc -N $NODES -q interactive -C haswell -t 2:00:00
+srun -N $NODES -n $NODES -c 64 \
+    wrap-redrock --dryrun \
+        --reduxdir $BASEDIR/spectro/redux/v1/tiles \
+        --archetypes $SCRATCH/desi/code/redrock-archetypes \
+        --prefix tilespectra 
+
+srun -N $NODES -n $NODES -c 64 \
+    wrap-redrock \
+        --reduxdir $BASEDIR/spectro/redux/v1/tiles \
+        --archetypes $SCRATCH/desi/code/redrock-archetypes \
+        --prefix tilespectra 
+
+#-------------------------------------------------------------------------
+#- pixsim WIP before continuing with svdc2019c
+
+godesi master
+module swap desisim/sjb
+module swap desispec/sjb
+
+export BASEDIR=$SCRATCH/desi/svdc2019c
+
+export DESI_COSMICS_TEMPLATES=$DESI_ROOT/spectro/templates/cosmics/v0.3
+export DESI_SPECTRO_SIM=$BASEDIR/spectro/sim
+export PIXPROD=v1
+
+srun -n 32 -c 2 pixsim_mpi --night 20200103 --expid 1020 --cosmics --nspec 5 --verbose
 
 #-------------------------------------------------------------------------
 #- svdc2019c
@@ -176,7 +212,7 @@ export DESI_SPECTRO_DATA=$DESI_SPECTRO_SIM/$PIXPROD
 
 #- 601 exposures
 #- memory limited; run one process per node (maybe 2 would have worked)
-#- ~2-5 (node-min)/exp
+#- ~7 (node-min)/exp on average (70min total) but quite variable
 export NODES=60
 salloc -N $NODES -C haswell -t 04:00:00 -q interactive
 time srun -N $NODES -n $NODES -c 64 \
