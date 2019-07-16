@@ -1,0 +1,83 @@
+#!/usr/bin/env python
+
+'''
+Run Redrock on nightly grouping of spectra
+
+srun -N 5 -n 5 rrnight
+'''
+
+import os, sys, glob, time
+import subprocess
+
+from mpi4py import MPI
+comm = MPI.COMM_WORLD
+rank = comm.rank
+size = comm.size
+
+#- Hardcoded paths...
+basedir = os.path.expandvars('$SCRATCH/desi/svdc2019c/spectro/redux/v1/tiles')
+archetypedir = os.path.expandvars('$SCRATCH/desi/code/redrock-archetypes')
+
+commands = list()
+logfiles = list()
+if rank == 0:
+    tileids = [int(x) for x in sorted(os.listdir(basedir))]
+    for tileid in tileids:
+        tiledir = os.path.join(basedir, str(tileid))
+        zbestfiles = glob.glob(tiledir+'/zbest-{:06d}-?-all.fits'.format(tileid))
+        zbestfiles = [os.path.basename(x) for x in zbestfiles]
+        for spectro in range(10):
+            zbestfile = 'zbest-{:06d}-{}-all.fits'.format(tileid, spectro)
+            if zbestfile in zbestfiles:
+                print('Already finished tileid {} spectrograph {}'.format(
+                    tileid, spectro))
+            else:
+                print('Adding tileid {} spectrograph {}'.format(tileid,spectro))
+                basename = 'tilespectra-{:06d}-{}-*.fits'.format(tileid, spectro)
+                specfiles = glob.glob(os.path.join(tiledir, basename))
+                if len(specfiles) == 0:
+                    print('ERROR: no specfiles for tile {} spectro {}'.format(
+                        tileid, spectro))
+                    continue
+
+                rrfile = zbestfile.replace('zbest-', 'redrock-').replace('.fits', '.h5')
+
+                cmd = 'rrdesi -o {}'.format(os.path.join(tiledir, rrfile))
+                cmd += ' -z {}'.format(os.path.join(tiledir, zbestfile))
+                cmd += ' --archetypes {}'.format(archetypedir)
+                for infile in specfiles:
+                    cmd += ' {}'.format(infile)
+                ### print(cmd)
+                commands.append(cmd)
+                logfile = rrfile.replace('.h5', '.log')
+                logfiles.append(os.path.join(tiledir, logfile))
+
+if rank == 0:
+    print('{} commands left to run'.format(len(commands)))
+
+commands = comm.bcast(commands, root=0)
+logfiles = comm.bcast(logfiles, root=0)
+
+if len(commands) == 0:
+    sys.exit(0)
+
+for i in range(rank, len(commands), size):
+    logfile = logfiles[i]
+    cmd = commands[i]
+    print('Rank {} {}'.format(rank, os.path.basename(logfile)))
+    sys.stdout.flush()
+    t0 = time.time()
+    with open(logfile, 'w') as log:
+        log.write(cmd + '\n\n')
+        err = subprocess.call(cmd.split(), stdout=log, stderr=log)
+
+    dt = (time.time() - t0) / 60
+    if err == 0:
+        print('Rank {} SUCCESS {} {:.1f} min'.format(rank, logfile, dt))
+    else:
+        print('Rank {} FAILED {} {:.1f} min'.format(rank, logfile, dt))
+
+
+
+
+
